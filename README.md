@@ -15,8 +15,14 @@ preview cache keyed by content hash. A 775MB Ableton project set browses from
 
 ## Features
 
-- Repository list, commit history, file tree, file downloads
+- Repository list, commit history, file tree, file downloads, copyable
+  `lore clone` commands
 - Waveform / keyframe-strip / thumbnail previews with durations
+- In-browser audio/video playback — seekable (HTTP Range) streaming that
+  hydrates transiently and purges after a few idle minutes
+- **Preview plugins**: drop a `.py` in `plugins/` to add thumbnails and
+  metadata chips for new file types; ships with MIDI (piano-roll) and
+  Ableton Live (track map, tempo, devices used) inspectors
 - Preview cache keyed by content SHA-256 — identical files across repos
   render once, unchanged files are never reprocessed
 - Downloads re-hydrate single files on demand (`lore reset`), then purge again
@@ -39,11 +45,13 @@ LORE_REMOTE=lore://your-server:41337 python3 server.py
 | var | default | |
 |---|---|---|
 | `LORE_REMOTE` | `lore://127.0.0.1:41337` | the loreserver to browse |
+| `LORE_PUBLIC_REMOTE` | `LORE_REMOTE` | reachable URL shown in clone commands (set when the server connects via localhost) |
 | `PORT` | `41340` | HTTP port |
 | `LORE_WEB_AUTH` | *(empty)* | `user:password` — enables HTTP Basic auth on all routes |
 | `PREVIEW_ONLY` | `1` | purge binaries after preview; `0` keeps full working copies |
 | `CLONES_DIR` | `~/lore-web-clones` | viewer clones + manifests |
-| `PREVIEWS_DIR` | sibling `lore-web-previews` | preview PNG cache |
+| `PREVIEWS_DIR` | sibling `lore-web-previews` | preview cache (PNG/SVG) |
+| `PLUGINS_DIR` | `./plugins` | preview plugin directory |
 | `LORE_BIN`, `FFMPEG`, `FFPROBE` | | tool path overrides |
 
 ## Preview plugins
