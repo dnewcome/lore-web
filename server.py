@@ -44,11 +44,46 @@ FFPROBE = os.environ.get("FFPROBE", "ffprobe")
 PORT = int(os.environ.get("PORT", "41340"))
 # "user:password" enables HTTP Basic auth on every route; empty disables it
 AUTH = os.environ.get("LORE_WEB_AUTH", "")
+PLUGINS_DIR = os.path.expanduser(os.environ.get(
+    "PLUGINS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "plugins")))
 SYNC_TTL = 60
 
 AUDIO_EXT = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".m4a", ".opus"}
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def load_plugins():
+    """Load preview plugins: any plugins/*.py exposing MATCH + inspect()."""
+    import importlib.util
+    mods = []
+    if os.path.isdir(PLUGINS_DIR):
+        for fn in sorted(os.listdir(PLUGINS_DIR)):
+            if not fn.endswith(".py") or fn.startswith("_"):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"loreweb_plugin_{fn[:-3]}", os.path.join(PLUGINS_DIR, fn))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "MATCH") and hasattr(mod, "inspect"):
+                    mod._name = fn[:-3]
+                    mods.append(mod)
+            except Exception as e:  # noqa: BLE001 - a bad plugin must not kill the server
+                print(f"plugin {fn}: failed to load: {e}")
+    return mods
+
+
+PLUGINS = load_plugins()
+
+
+def plugin_for(relpath):
+    ext = os.path.splitext(relpath)[1].lower()
+    for p in PLUGINS:
+        if ext in p.MATCH:
+            return p
+    return None
 
 _lock = threading.Lock()          # one lore/ffmpeg pipeline at a time
 _last_sync = {}
@@ -176,17 +211,39 @@ def absorb_file(path, rel, manifest):
     full = os.path.join(path, rel)
     digest = sha256_file(full)
     kind = file_kind(rel)
+    plugin = plugin_for(rel)
     entry = manifest.get(rel, {})
-    if entry.get("sha256") != digest:
+    if entry.get("sha256") != digest or \
+            entry.get("pv_by") != (plugin._name if plugin else "builtin"):
         entry = {
             "sha256": digest,
             "size": os.path.getsize(full),
             "kind": kind,
             "mtime": int(os.path.getmtime(full)),
+            "pv_by": "builtin",
         }
         if kind in ("audio", "video"):
             entry["duration"] = probe_duration(full)
-        if render_preview(full, kind, digest, entry.get("duration")):
+        if plugin:
+            try:
+                res = plugin.inspect(full, {"run": run, "ffmpeg": FFMPEG,
+                                            "ffprobe": FFPROBE}) or {}
+                if res.get("meta"):
+                    entry["meta"] = res["meta"]
+                if res.get("kind"):
+                    entry["kind"] = res["kind"]
+                art = res.get("preview")
+                if art:
+                    data, fmt = art
+                    pv = f"{digest}.{fmt}"
+                    with open(os.path.join(PREVIEWS, pv), "wb") as f:
+                        f.write(data)
+                    entry["preview"] = pv
+                entry["pv_by"] = plugin._name
+            except Exception as e:  # noqa: BLE001 - plugin failure falls back to builtin
+                print(f"plugin {plugin._name} failed on {rel}: {e}")
+        if "preview" not in entry and \
+                render_preview(full, kind, digest, entry.get("duration")):
             entry["preview"] = f"{digest}.png"
         lore_hash, _, _ = lore_file_hash(path, rel)
         entry["lore_hash"] = lore_hash
@@ -230,10 +287,15 @@ def refresh(name, force=False):
                 lore_hash, status, size = lore_file_hash(path, rel)
             except RuntimeError:
                 status = "Gone"
+            plugin = plugin_for(rel)
+            needs_replay = plugin and \
+                manifest[rel].get("pv_by") != plugin._name
             if status == "Gone" or lore_hash is None:
                 del manifest[rel]
-            elif manifest[rel].get("lore_hash") not in (None, lore_hash):
-                # changed remotely while purged locally: re-hydrate + redo
+            elif manifest[rel].get("lore_hash") not in (None, lore_hash) \
+                    or needs_replay:
+                # changed remotely, or a new plugin wants a look:
+                # re-hydrate + re-absorb just this file
                 run_lore(["reset", rel], cwd=path)
                 if os.path.exists(os.path.join(path, rel)):
                     absorb_file(path, rel, manifest)
@@ -300,7 +362,8 @@ def tree(name):
     path = refresh(name)
     manifest = load_manifest(path)
     return sorted(
-        ({"path": rel, **{k: v for k, v in e.items() if k != "lore_hash"}}
+        ({"path": rel,
+          **{k: v for k, v in e.items() if k not in ("lore_hash", "pv_by")}}
          for rel, e in manifest.items()),
         key=lambda e: e["path"])
 
@@ -323,6 +386,7 @@ td,th{text-align:left;padding:.35rem .6rem;border-bottom:1px solid #8883;vertica
 h2{display:flex;align-items:center;font-size:1.1rem}
 button{margin-left:.5rem}
 img.pv{display:block;max-width:460px;max-height:90px;border-radius:4px;background:#8881}
+.chip{display:inline-block;background:#8882;border-radius:10px;padding:0 .5rem;font-size:.75rem;margin:.15rem .15rem 0 0}
 </style></head><body>
 <nav><h1>lore-web</h1><div id="repos"></div>
 <p class="muted" id="remote"></p></nav>
@@ -351,10 +415,14 @@ async function show(name,refresh){
     <h3>Files</h3><table>${files.map((f,i)=>{
       const fu=`/api/repo/${name}/file?path=${encodeURIComponent(f.path)}`;
       const media=f.kind==='audio'?'audio':f.kind==='video'?'video':null;
+      const chips=f.meta?Object.entries(f.meta).flatMap(([k,v])=>
+        Array.isArray(v)?v.map(x=>`<span class="chip">${esc(x)}</span>`)
+        :[`<span class="chip">${esc(k)}: ${esc(v)}</span>`]).join(''):'';
       return `<tr>
       <td><a href="${fu}" title="download">${esc(f.path)}</a>
         ${media?` <button onclick="play(${i},'${media}','${fu}&inline=1')">&#9654;</button>`:''}
         ${f.preview?`<img class="pv" loading="lazy" src="/previews/${esc(f.preview)}" alt="">`:''}
+        ${chips?`<div>${chips}</div>`:''}
         <div id="player-${i}"></div></td>
       <td>${fmtSize(f.size)}</td><td>${fmtDur(f.duration)}</td></tr>`}).join('')||'<tr><td class=muted>empty</td></tr>'}</table>`;
   }catch(e){$('#main').innerHTML=`<h2>${esc(name)}</h2><p>error: ${esc(e.message)}</p>`}
@@ -460,11 +528,12 @@ class Handler(BaseHTTPRequestHandler):
             elif len(parts) == 2 and parts[0] == "previews":
                 name = os.path.basename(parts[1])
                 full = os.path.join(PREVIEWS, name)
-                if not re.fullmatch(r"[0-9a-f]{64}\.png", name) \
-                        or not os.path.isfile(full):
+                m = re.fullmatch(r"[0-9a-f]{64}\.(png|svg)", name)
+                if not m or not os.path.isfile(full):
                     raise KeyError("no such preview")
+                ctype = "image/svg+xml" if m.group(1) == "svg" else "image/png"
                 with open(full, "rb") as f:
-                    self._bytes(f.read(), "image/png")
+                    self._bytes(f.read(), ctype)
             elif len(parts) == 4 and parts[:2] == ["api", "repo"]:
                 name, action = parts[2], parts[3]
                 if action == "history":

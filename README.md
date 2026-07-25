@@ -46,6 +46,30 @@ LORE_REMOTE=lore://your-server:41337 python3 server.py
 | `PREVIEWS_DIR` | sibling `lore-web-previews` | preview PNG cache |
 | `LORE_BIN`, `FFMPEG`, `FFPROBE` | | tool path overrides |
 
+## Preview plugins
+
+Anything in `plugins/*.py` exposing `MATCH` (a list of extensions) and
+`inspect(path, ctx)` becomes a preview handler, taking precedence over the
+built-in ffmpeg ones. Return any of:
+
+```python
+{
+  "preview": (svg_or_png_bytes, "svg" | "png"),   # thumbnail for the file list
+  "meta":    {"tracks": 7, "bpm": 128, ...},       # rendered as chips in the UI
+  "kind":    "ableton",                            # overrides extension-based kind
+}
+```
+
+Plugin failures fall back to the built-in preview; results are cached by
+content hash, and when a new plugin appears, already-purged files are
+re-hydrated once and re-inspected automatically.
+
+Ships with two:
+
+- **`midi.py`** — pure-stdlib SMF parser; piano-roll SVG, track/note/BPM/length chips
+- **`ableton.py`** — reads `.als` (gzipped XML); track-map SVG, track counts,
+  tempo, and the devices/plugins used in the set
+
 ## How it works
 
 The server keeps one clone per repository. On first contact (and after each
