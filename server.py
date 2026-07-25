@@ -19,7 +19,9 @@ Env config:
   FFMPEG/FFPROBE                          override tool paths
   PORT          41340
 """
+import base64
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -40,6 +42,8 @@ PREVIEW_ONLY = os.environ.get("PREVIEW_ONLY", "1") == "1"
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("FFPROBE", "ffprobe")
 PORT = int(os.environ.get("PORT", "41340"))
+# "user:password" enables HTTP Basic auth on every route; empty disables it
+AUTH = os.environ.get("LORE_WEB_AUTH", "")
 SYNC_TTL = 60
 
 AUDIO_EXT = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".m4a", ".opus"}
@@ -237,6 +241,9 @@ def refresh(name, force=False):
     return path
 
 
+_hydrated = {}  # full path -> last access time (janitor purges idle ones)
+
+
 def hydrate_for_download(name, rel):
     path = refresh(name)
     manifest = load_manifest(path)
@@ -251,7 +258,24 @@ def hydrate_for_download(name, rel):
             run_lore(["reset", rel], cwd=path)
     if not os.path.isfile(full):
         raise KeyError("could not hydrate")
+    _hydrated[full] = time.time()
     return path, full
+
+
+def janitor():
+    """Purge hydrated files once idle (players issue many Range requests)."""
+    while True:
+        time.sleep(60)
+        if not PREVIEW_ONLY:
+            continue
+        now = time.time()
+        for full, last in list(_hydrated.items()):
+            if now - last > 300:
+                try:
+                    os.unlink(full)
+                except OSError:
+                    pass
+                _hydrated.pop(full, None)
 
 
 def history(name):
@@ -324,11 +348,24 @@ async function show(name,refresh){
     const [hist,files]=await Promise.all([j(`/api/repo/${name}/history${q}`),j(`/api/repo/${name}/tree`)]);
     $('#main').innerHTML=`<h2>${esc(name)} <button onclick="show(current,1)">sync</button></h2>
     <h3>History</h3><table>${hist.map(r=>`<tr><td>#${esc(r.revision)}</td><td class="msg">${esc(r.message)}</td><td>${esc(r.date||'')}</td><td class="sig">${esc((r.signature||'').slice(0,10))}</td></tr>`).join('')||'<tr><td class=muted>no revisions</td></tr>'}</table>
-    <h3>Files</h3><table>${files.map(f=>`<tr>
-      <td><a href="/api/repo/${name}/file?path=${encodeURIComponent(f.path)}">${esc(f.path)}</a>
-        ${f.preview?`<img class="pv" loading="lazy" src="/previews/${esc(f.preview)}" alt="">`:''}</td>
-      <td>${fmtSize(f.size)}</td><td>${fmtDur(f.duration)}</td></tr>`).join('')||'<tr><td class=muted>empty</td></tr>'}</table>`;
+    <h3>Files</h3><table>${files.map((f,i)=>{
+      const fu=`/api/repo/${name}/file?path=${encodeURIComponent(f.path)}`;
+      const media=f.kind==='audio'?'audio':f.kind==='video'?'video':null;
+      return `<tr>
+      <td><a href="${fu}" title="download">${esc(f.path)}</a>
+        ${media?` <button onclick="play(${i},'${media}','${fu}&inline=1')">&#9654;</button>`:''}
+        ${f.preview?`<img class="pv" loading="lazy" src="/previews/${esc(f.preview)}" alt="">`:''}
+        <div id="player-${i}"></div></td>
+      <td>${fmtSize(f.size)}</td><td>${fmtDur(f.duration)}</td></tr>`}).join('')||'<tr><td class=muted>empty</td></tr>'}</table>`;
   }catch(e){$('#main').innerHTML=`<h2>${esc(name)}</h2><p>error: ${esc(e.message)}</p>`}
+}
+function play(i,kind,url){
+  const slot=$('#player-'+i);
+  if(slot.firstChild){slot.innerHTML='';return}
+  document.querySelectorAll('[id^=player-]').forEach(p=>p.innerHTML='');
+  slot.innerHTML=kind==='audio'
+    ?`<audio controls autoplay preload="none" style="width:460px" src="${url}"></audio>`
+    :`<video controls autoplay preload="none" style="max-width:460px" src="${url}"></video>`;
 }
 loadRepos();
 fetch('/api/info').then(r=>r.json()).then(i=>$('#remote').textContent=i.remote+(i.ffmpeg?'':' (no ffmpeg: previews off)'));
@@ -351,7 +388,62 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_file(self, full, inline):
+        """Stream a file with single-range support (audio/video seeking)."""
+        size = os.path.getsize(full)
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        start, end = 0, size - 1
+        status = 200
+        m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range", ""))
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                if m.group(2):
+                    end = min(int(m.group(2)), size - 1)
+            else:  # suffix range: last N bytes
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        disp = "inline" if inline else \
+            f'attachment; filename="{os.path.basename(full)}"'
+        self.send_header("Content-Disposition", disp)
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        with open(full, "rb") as f:
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = f.read(min(1 << 16, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
+    def _authorized(self):
+        if not AUTH:
+            return True
+        want = "Basic " + base64.b64encode(AUTH.encode()).decode()
+        if hmac.compare_digest(self.headers.get("Authorization", ""), want):
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="lore-web"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     def do_GET(self):
+        if not self._authorized():
+            return
         try:
             url = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(url.query)
@@ -383,22 +475,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(tree(name))
                 elif action == "file":
                     rel = qs.get("path", [""])[0]
+                    inline = qs.get("inline", ["0"])[0] == "1"
                     path, full = hydrate_for_download(name, rel)
-                    ctype = mimetypes.guess_type(full)[0] or \
-                        "application/octet-stream"
-                    self.send_response(200)
-                    self.send_header("Content-Type", ctype)
-                    self.send_header(
-                        "Content-Disposition",
-                        f'attachment; filename="{os.path.basename(full)}"')
-                    self.send_header("Content-Length",
-                                     str(os.path.getsize(full)))
-                    self.end_headers()
-                    with open(full, "rb") as f:
-                        while chunk := f.read(1 << 16):
-                            self.wfile.write(chunk)
-                    if PREVIEW_ONLY:
-                        os.unlink(full)
+                    self._send_file(full, inline)
                 else:
                     self._json({"error": "unknown action"}, 404)
             else:
@@ -417,7 +496,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     os.makedirs(CLONES, exist_ok=True)
     os.makedirs(PREVIEWS, exist_ok=True)
+    threading.Thread(target=janitor, daemon=True).start()
     print(f"lore-web on :{PORT} -> {REMOTE}")
     print(f"  clones: {CLONES}  previews: {PREVIEWS}  "
-          f"preview_only={PREVIEW_ONLY} ffmpeg={have_ffmpeg()}")
+          f"preview_only={PREVIEW_ONLY} ffmpeg={have_ffmpeg()} "
+          f"auth={'on' if AUTH else 'off'}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
