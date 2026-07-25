@@ -34,6 +34,9 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REMOTE = os.environ.get("LORE_REMOTE", "lore://127.0.0.1:41337")
+# what clone commands in the UI should point at (a reachable hostname,
+# e.g. lore://nas.local:41337) -- defaults to LORE_REMOTE
+PUBLIC_REMOTE = os.environ.get("LORE_PUBLIC_REMOTE", REMOTE)
 LORE = os.path.expanduser(os.environ.get("LORE_BIN", "~/.local/bin/lore"))
 CLONES = os.path.expanduser(os.environ.get("CLONES_DIR", "~/lore-web-clones"))
 PREVIEWS = os.path.expanduser(os.environ.get(
@@ -387,6 +390,8 @@ h2{display:flex;align-items:center;font-size:1.1rem}
 button{margin-left:.5rem}
 img.pv{display:block;max-width:460px;max-height:90px;border-radius:4px;background:#8881}
 .chip{display:inline-block;background:#8882;border-radius:10px;padding:0 .5rem;font-size:.75rem;margin:.15rem .15rem 0 0}
+.clone{display:flex;gap:.5rem;align-items:center;margin:.25rem 0 .75rem}
+.clone code{background:#8882;padding:.3rem .6rem;border-radius:6px;font-size:.8rem;overflow-x:auto;white-space:nowrap}
 </style></head><body>
 <nav><h1>lore-web</h1><div id="repos"></div>
 <p class="muted" id="remote"></p></nav>
@@ -396,8 +401,10 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtSize=n=>n>1e9?(n/1e9).toFixed(1)+' GB':n>1e6?(n/1e6).toFixed(1)+' MB':n>1e3?(n/1e3).toFixed(1)+' KB':n+' B';
 const fmtDur=s=>s==null?'':(s>=60?Math.floor(s/60)+'m'+String(Math.round(s%60)).padStart(2,'0')+'s':s+'s');
-let current=null;
+let current=null,info={};
 async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(await r.text());return r.json()}
+function cloneCmd(name){return `lore clone ${info.public_remote||''}/${name} ${name}`}
+function copyClone(name,btn){navigator.clipboard.writeText(cloneCmd(name)).then(()=>{btn.textContent='copied';setTimeout(()=>btn.textContent='copy',1200)})}
 async function loadRepos(){
   const repos=await j('/api/repos');
   $('#repos').innerHTML=repos.map(r=>`<a href="#" data-n="${esc(r.name)}">${esc(r.name)}</a>`).join('');
@@ -411,6 +418,7 @@ async function show(name,refresh){
   try{
     const [hist,files]=await Promise.all([j(`/api/repo/${name}/history${q}`),j(`/api/repo/${name}/tree`)]);
     $('#main').innerHTML=`<h2>${esc(name)} <button onclick="show(current,1)">sync</button></h2>
+    <div class="clone"><code>${esc(cloneCmd(name))}</code><button onclick="copyClone('${esc(name)}',this)">copy</button></div>
     <h3>History</h3><table>${hist.map(r=>`<tr><td>#${esc(r.revision)}</td><td class="msg">${esc(r.message)}</td><td>${esc(r.date||'')}</td><td class="sig">${esc((r.signature||'').slice(0,10))}</td></tr>`).join('')||'<tr><td class=muted>no revisions</td></tr>'}</table>
     <h3>Files</h3><table>${files.map((f,i)=>{
       const fu=`/api/repo/${name}/file?path=${encodeURIComponent(f.path)}`;
@@ -435,8 +443,7 @@ function play(i,kind,url){
     ?`<audio controls autoplay preload="none" style="width:460px" src="${url}"></audio>`
     :`<video controls autoplay preload="none" style="max-width:460px" src="${url}"></video>`;
 }
-loadRepos();
-fetch('/api/info').then(r=>r.json()).then(i=>$('#remote').textContent=i.remote+(i.ffmpeg?'':' (no ffmpeg: previews off)'));
+fetch('/api/info').then(r=>r.json()).then(i=>{info=i;$('#remote').textContent=(i.public_remote||i.remote)+(i.ffmpeg?'':' (no ffmpeg: previews off)')}).then(loadRepos);
 </script></body></html>"""
 
 
@@ -521,7 +528,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/":
                 self._bytes(PAGE.encode(), "text/html; charset=utf-8")
             elif url.path == "/api/info":
-                self._json({"remote": REMOTE, "ffmpeg": have_ffmpeg(),
+                self._json({"remote": REMOTE, "public_remote": PUBLIC_REMOTE,
+                            "ffmpeg": have_ffmpeg(),
                             "preview_only": PREVIEW_ONLY})
             elif url.path == "/api/repos":
                 self._json(list_repos())
