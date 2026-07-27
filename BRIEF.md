@@ -1,7 +1,18 @@
-# lore-web — kickoff brief
+# lore-web: FL archaeology — kickoff brief
 
-- **Problem:** Lore (the NAS VCS pilot) has no web UI anywhere — CLI-only visibility into repos.
-- **Done looks like:** a read-only browser page served from the NAS: list repos, per-repo commit history, file tree at head, download a file. No auth (LAN-only, like the pilot itself).
-- **Not now:** writes/commits from the browser, auth, waveform/als-diff rendering (that's the future media dashboard), pretty design.
-- **First slice:** decide data path (lore-js SDK vs CLI wrapper), then repo list + history rendering end-to-end.
-- **Open question:** can the SDK/CLI read remote repo metadata without a full local clone?
+- **Problem:** Years of old FruityLoops projects on the NAS (zipped project bundles
+  under a `produktion` folder), with the same samples copied into every project;
+  no picture of what's there, what's unique, or what the duplicates waste.
+- **Done looks like:** A read-only scan report: every `.flp` parsed (pyflp) for its
+  sample references, every WAV content-hashed — including inside the zips — with
+  unique-vs-duplicate counts, reclaimable bytes, and a project↔sample sharing map.
+- **Not now:** Touching any NAS file (no moves, hardlinks, relinks, deletes);
+  Lore ingest; Reaper/video inspectors; rendering the report in the viewer UI.
+  The report's numbers decide the next step.
+- **First slice:** `flscan.py` — point it at the produktion FLP-zip folder; it
+  walks, parses, hashes, and emits JSON plus a human-readable summary.
+- **Open question:** Do the oldest (early-FruityLoops-era) `.flp` files parse with
+  pyflp, and do the sample paths inside them resolve? Fallback: minimal event
+  parser for just those.
+
+*(Original repo-viewer brief delivered and superseded — see README for what shipped.)*
