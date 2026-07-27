@@ -392,6 +392,9 @@ img.pv{display:block;max-width:460px;max-height:90px;border-radius:4px;backgroun
 .chip{display:inline-block;background:#8882;border-radius:10px;padding:0 .5rem;font-size:.75rem;margin:.15rem .15rem 0 0}
 .clone{display:flex;gap:.5rem;align-items:center;margin:.25rem 0 .75rem}
 .clone code{background:#8882;padding:.3rem .6rem;border-radius:6px;font-size:.8rem;overflow-x:auto;white-space:nowrap}
+details.dir{margin:.15rem 0;padding-left:.75rem;border-left:1px solid #8883}
+details.dir>summary{cursor:pointer;padding:.25rem .4rem;border-radius:6px;user-select:none;list-style-position:outside}
+details.dir>summary:hover{background:#8882}
 </style></head><body>
 <nav><h1>lore-web</h1><div id="repos"></div>
 <p class="muted" id="remote"></p></nav>
@@ -420,20 +423,47 @@ async function show(name,refresh){
     $('#main').innerHTML=`<h2>${esc(name)} <button onclick="show(current,1)">sync</button></h2>
     <div class="clone"><code>${esc(cloneCmd(name))}</code><button onclick="copyClone('${esc(name)}',this)">copy</button></div>
     <h3>History</h3><table>${hist.map(r=>`<tr><td>#${esc(r.revision)}</td><td class="msg">${esc(r.message)}</td><td>${esc(r.date||'')}</td><td class="sig">${esc((r.signature||'').slice(0,10))}</td></tr>`).join('')||'<tr><td class=muted>no revisions</td></tr>'}</table>
-    <h3>Files</h3><table>${files.map((f,i)=>{
-      const fu=`/api/repo/${name}/file?path=${encodeURIComponent(f.path)}`;
-      const media=f.kind==='audio'?'audio':f.kind==='video'?'video':null;
-      const chips=f.meta?Object.entries(f.meta).flatMap(([k,v])=>
-        Array.isArray(v)?v.map(x=>`<span class="chip">${esc(x)}</span>`)
-        :[`<span class="chip">${esc(k)}: ${esc(v)}</span>`]).join(''):'';
-      return `<tr>
-      <td><a href="${fu}" title="download">${esc(f.path)}</a>
-        ${media?` <button onclick="play(${i},'${media}','${fu}&inline=1')">&#9654;</button>`:''}
-        ${f.preview?`<img class="pv" loading="lazy" src="/previews/${esc(f.preview)}" alt="">`:''}
-        ${chips?`<div>${chips}</div>`:''}
-        <div id="player-${i}"></div></td>
-      <td>${fmtSize(f.size)}</td><td>${fmtDur(f.duration)}</td></tr>`}).join('')||'<tr><td class=muted>empty</td></tr>'}</table>`;
+    <h3>Files</h3>${renderTree(files)||'<p class="muted">empty</p>'}`;
   }catch(e){$('#main').innerHTML=`<h2>${esc(name)}</h2><p>error: ${esc(e.message)}</p>`}
+}
+function fileRow(f,i){
+  const fu=`/api/repo/${current}/file?path=${encodeURIComponent(f.path)}`;
+  const media=f.kind==='audio'?'audio':f.kind==='video'?'video':null;
+  const chips=f.meta?Object.entries(f.meta).flatMap(([k,v])=>
+    Array.isArray(v)?v.map(x=>`<span class="chip">${esc(x)}</span>`)
+    :[`<span class="chip">${esc(k)}: ${esc(v)}</span>`]).join(''):'';
+  return `<tr>
+  <td><a href="${fu}" title="download">${esc(f.path.split('/').pop())}</a>
+    ${media?` <button onclick="play(${i},'${media}','${fu}&inline=1')">&#9654;</button>`:''}
+    ${f.preview?`<img class="pv" loading="lazy" src="/previews/${esc(f.preview)}" alt="">`:''}
+    ${chips?`<div>${chips}</div>`:''}
+    <div id="player-${i}"></div></td>
+  <td>${fmtSize(f.size)}</td><td>${fmtDur(f.duration)}</td></tr>`;
+}
+function renderTree(files){
+  const root={dirs:{},files:[]};
+  files.forEach((f,i)=>{
+    let node=root;
+    for(const p of f.path.split('/').slice(0,-1))
+      node=node.dirs[p]??=(node.dirs[p]={dirs:{},files:[]});
+    node.files.push([f,i]);
+  });
+  const stats=node=>{
+    let n=node.files.length,b=node.files.reduce((s,[f])=>s+(f.size||0),0);
+    for(const d of Object.values(node.dirs)){const [n2,b2]=stats(d);n+=n2;b+=b2}
+    return [n,b];
+  };
+  const render=(node,depth)=>{
+    const dirs=Object.keys(node.dirs).sort((a,b)=>a.localeCompare(b)).map(d=>{
+      const [n,b]=stats(node.dirs[d]);
+      return `<details class="dir"${depth===0?' open':''}><summary>${esc(d)}/
+        <span class="muted">${n} file${n===1?'':'s'}, ${fmtSize(b)}</span></summary>
+        ${render(node.dirs[d],depth+1)}</details>`;
+    }).join('');
+    return dirs+(node.files.length
+      ?`<table>${node.files.map(([f,i])=>fileRow(f,i)).join('')}</table>`:'');
+  };
+  return render(root,0);
 }
 function play(i,kind,url){
   const slot=$('#player-'+i);
