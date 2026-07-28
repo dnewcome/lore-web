@@ -293,3 +293,76 @@ def inspect(path, ctx):
 
     svg = _pattern_svg(info, rows[:14]) or _rack_svg(rows)
     return {"meta": meta, "kind": "flp", "preview": (svg, "svg")}
+
+
+# ------------------------------------------------------------------ cli
+# Also usable standalone: `python3 plugins/flp.py song.flp` (or a directory).
+
+def _cli():
+    import argparse
+    import glob
+    import json
+    import os
+    import sys
+
+    ap = argparse.ArgumentParser(
+        description="Inspect FruityLoops/FL Studio .flp projects "
+                    "(pure stdlib; reads FL 1.x through modern).")
+    ap.add_argument("paths", nargs="+", help=".flp files or directories")
+    ap.add_argument("--json", action="store_true",
+                    help="emit one JSON object per project")
+    ap.add_argument("--samples", action="store_true",
+                    help="list every referenced sample path")
+    ap.add_argument("--svg", metavar="DIR",
+                    help="also write each project's preview SVG here")
+    args = ap.parse_args()
+
+    files = []
+    for p in args.paths:
+        if os.path.isdir(p):
+            files += sorted(glob.glob(os.path.join(p, "**", "*.[fF][lL][pP]"),
+                                      recursive=True))
+        else:
+            files.append(p)
+    if args.svg:
+        os.makedirs(args.svg, exist_ok=True)
+
+    rc = 0
+    for path in files:
+        try:
+            res = inspect(path, {})
+            with open(path, "rb") as f:
+                info = parse_flp(f.read())
+        except Exception as e:  # noqa: BLE001 - report and keep going
+            print(f"{path}: ERROR {type(e).__name__}: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        meta = res["meta"]
+        samples = [c["sample"] for c in info["channels"] if c["sample"]]
+        if args.svg:
+            out = os.path.join(
+                args.svg, os.path.basename(path).rsplit(".", 1)[0] + ".svg")
+            with open(out, "wb") as f:
+                f.write(res["preview"][0])
+        if args.json:
+            print(json.dumps({"path": path, **meta,
+                              "sample_paths": samples if args.samples
+                              else None}, default=str))
+            continue
+        head = f"{os.path.basename(path)}  FL {meta.get('fl', '?')}"
+        if meta.get("title"):
+            head += f"  “{meta['title']}”"
+        print(head)
+        print(f"  {meta.get('bpm', '?')} bpm, {meta['channels']} channels "
+              f"({meta['samples']} sampler), {meta.get('patterns', 0)} "
+              f"patterns, {meta.get('notes', 0)} notes/steps")
+        if meta.get("plugins"):
+            print(f"  plugins: {', '.join(meta['plugins'])}")
+        if args.samples:
+            for s in samples:
+                print(f"    {s}")
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
