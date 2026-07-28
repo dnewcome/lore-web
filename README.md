@@ -95,6 +95,25 @@ This leans on two behaviors verified against loreserver 0.8.5:
 
 If a future Lore release changes either, set `PREVIEW_ONLY=0`.
 
+## Namespaces
+
+Lore accepts slashes in repository names, which works as an org/section
+mechanism without any extra concept:
+
+```bash
+lore repository create lore://your-server:41337/bl1t/drums
+lore clone lore://your-server:41337/bl1t/drums drums
+```
+
+The viewer groups them: `bl1t/drums` and `bl1t/synths` appear as `drums`
+and `synths` under a collapsible **bl1t** heading in the sidebar.
+
+Prefer one repo per project over a single large one — collaborators clone
+only what they need, each project gets its own history, and identical files
+are still stored once across repos by the content-addressed store. For
+composing repos (a shared sample library mounted into each project, say),
+see `lore link add`.
+
 ## Running it as a service
 
 Two processes are involved, and they're deliberately separate:

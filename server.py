@@ -507,7 +507,8 @@ const fmtSize=n=>n>1e9?(n/1e9).toFixed(1)+' GB':n>1e6?(n/1e6).toFixed(1)+' MB':n
 const fmtDur=s=>s==null?'':(s>=60?Math.floor(s/60)+'m'+String(Math.round(s%60)).padStart(2,'0')+'s':s+'s');
 let current=null,info={};
 async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(await r.text());return r.json()}
-function cloneCmd(name){return `lore clone ${info.public_remote||''}/${name} ${name}`}
+// clone into a plain directory: "bl1t/drums" would need its parent to exist
+function cloneCmd(name){return `lore clone ${info.public_remote||''}/${name} ${name.split('/').pop()}`}
 function copyClone(name,btn){navigator.clipboard.writeText(cloneCmd(name)).then(()=>{btn.textContent='copied';setTimeout(()=>btn.textContent='copy',1200)})}
 async function loadRepos(){
   const repos=await j('/api/repos');
