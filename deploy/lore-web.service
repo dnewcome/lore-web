@@ -1,0 +1,24 @@
+[Unit]
+Description=lore-web (read-only web viewer for Lore repositories)
+Documentation=https://github.com/dnewcome/lore-web
+# loreserver is what it browses; start after it, and don't run without the
+# data volume (fstab has it nofail, so it can be late or absent)
+After=network-online.target loreserver.service
+Wants=network-online.target
+Requires=loreserver.service
+RequiresMountsFor=/mnt/nas2tb
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/nas2tb/lore/web
+EnvironmentFile=/mnt/nas2tb/lore/web/env
+ExecStart=/usr/bin/python3 /mnt/nas2tb/lore/web/server.py
+Restart=always
+RestartSec=5
+# journald handles rotation; no more unbounded lore-web.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lore-web
+
+[Install]
+WantedBy=default.target

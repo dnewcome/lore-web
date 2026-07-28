@@ -95,6 +95,34 @@ This leans on two behaviors verified against loreserver 0.8.5:
 
 If a future Lore release changes either, set `PREVIEW_ONLY=0`.
 
+## Running it as a service
+
+Two processes are involved, and they're deliberately separate:
+
+1. **`loreserver`** — Epic's Lore server (third party, installed on its own,
+   holds the repositories). `deploy/loreserver.service` just supervises it.
+2. **`lore-web`** — this viewer, which talks to it over `LORE_REMOTE`.
+
+`deploy/deploy.sh` pushes *only this repo's code* (`server.py`, `plugins/`)
+to the host over ssh and restarts the viewer; it never touches the
+loreserver binary, the env file, clones, or the preview cache. Both run as
+**systemd user services** (no root needed — `loginctl enable-linger` is
+enough), with `Restart=always`, ordering via `Requires=`/`After=`, a
+`RequiresMountsFor=` guard so neither starts before the data volume mounts,
+and logs in the journal rather than an unbounded file.
+
+```bash
+./deploy/deploy.sh --units     # install + enable both units (once)
+./deploy/deploy.sh             # sync code, restart, health-check
+./deploy/deploy.sh --status    # what's running
+HOST=nas ./deploy/deploy.sh    # pick the ssh host (default: nas)
+```
+
+```bash
+journalctl --user -u lore-web -f            # follow logs
+systemctl --user restart lore-web           # restart by hand
+```
+
 ## Security
 
 This is a read-only viewer, but downloads expose full repository contents:

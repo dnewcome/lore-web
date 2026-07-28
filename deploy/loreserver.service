@@ -1,0 +1,17 @@
+[Unit]
+Description=loreserver (Lore version control server)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/nas2tb
+
+[Service]
+Type=simple
+ExecStart=/home/dan/.local/bin/loreserver --config /mnt/nas2tb/lore/config
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=loreserver
+
+[Install]
+WantedBy=default.target
