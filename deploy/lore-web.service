@@ -6,12 +6,16 @@ Documentation=https://github.com/dnewcome/lore-web
 After=network-online.target loreserver.service
 Wants=network-online.target
 Requires=loreserver.service
-RequiresMountsFor=/mnt/nas2tb
+# RequiresMountsFor= is useless in a *user* unit (mount units live in the
+# system manager and user units can't depend on them), and /mnt/nas2tb is
+# nofail in fstab - so gate on the mount ourselves and let Restart retry.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=/mnt/nas2tb/lore/web
 EnvironmentFile=/mnt/nas2tb/lore/web/env
+ExecStartPre=/bin/sh -c 'mountpoint -q /mnt/nas2tb'
 ExecStart=/usr/bin/python3 /mnt/nas2tb/lore/web/server.py
 Restart=always
 RestartSec=5
