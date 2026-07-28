@@ -1,0 +1,25 @@
+[Unit]
+Description=lore-web (read-only web viewer for Lore repositories)
+Documentation=https://github.com/dnewcome/lore-web
+# loreserver is what it browses; start after it
+After=network-online.target loreserver.service
+Wants=network-online.target
+Requires=loreserver.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@REMOTE_DIR@
+# NOT EnvironmentFile= - that parses bare KEY=VALUE and silently ignores the
+# `export ` prefix an env file usually has, which starts the server on
+# defaults: no auth, no ffmpeg, clones in $HOME. Source it instead.
+@MOUNT_GATE@
+ExecStart=/bin/sh -c '. @REMOTE_DIR@/env && exec @PYTHON_BIN@ @REMOTE_DIR@/server.py'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lore-web
+
+[Install]
+WantedBy=default.target

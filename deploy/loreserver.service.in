@@ -2,13 +2,12 @@
 Description=loreserver (Lore version control server)
 After=network-online.target
 Wants=network-online.target
-# see lore-web.service: RequiresMountsFor= does nothing in a user unit
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c 'mountpoint -q /mnt/nas2tb'
-ExecStart=/home/dan/.local/bin/loreserver --config /mnt/nas2tb/lore/config
+@MOUNT_GATE@
+ExecStart=@LORESERVER_BIN@ --config @LORESERVER_CONFIG@
 Restart=always
 RestartSec=5
 StandardOutput=journal

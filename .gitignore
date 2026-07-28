@@ -1,2 +1,7 @@
 node_modules/
 __pycache__/
+# local deployment settings and any runtime env file (may hold credentials)
+.env
+env
+*.env
+!.env.example

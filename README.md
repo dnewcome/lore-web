@@ -126,16 +126,24 @@ Two processes are involved, and they're deliberately separate:
 to the host over ssh and restarts the viewer; it never touches the
 loreserver binary, the env file, clones, or the preview cache. Both run as
 **systemd user services** (no root needed — `loginctl enable-linger` is
-enough), with `Restart=always`, ordering via `Requires=`/`After=`, a
-`RequiresMountsFor=` guard so neither starts before the data volume mounts,
+enough), with `Restart=always`, ordering via `Requires=`/`After=`, an
+optional mountpoint gate so neither starts before the data volume mounts,
 and logs in the journal rather than an unbounded file.
 
+Paths and hosts come from a git-ignored `.env`:
+
 ```bash
-./deploy/deploy.sh --units     # install + enable both units (once)
-./deploy/deploy.sh             # sync code, restart, health-check
-./deploy/deploy.sh --status    # what's running
-HOST=nas ./deploy/deploy.sh    # pick the ssh host (default: nas)
+cp .env.example .env && $EDITOR .env   # host, remote dir, binary paths
+./deploy/deploy.sh --units             # install + enable both units (once)
+./deploy/deploy.sh                     # sync code, restart, health-check
+./deploy/deploy.sh --status            # what's running
+DEPLOY_HOST=other ./deploy/deploy.sh   # override anything ad hoc
 ```
+
+The unit files are templates (`deploy/*.service.in`) rendered with those
+values at install time, so nothing about your machine is baked into the
+repo. Runtime settings (ports, credentials, cache locations) live in an
+`env` file **on the host** — see the bottom of `.env.example`.
 
 ```bash
 journalctl --user -u lore-web -f            # follow logs
