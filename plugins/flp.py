@@ -13,8 +13,16 @@ two encodings, both handled here:
 
 Preview: channel rows x pattern lanes; lit steps as cells, notes as blocks
 with a pitch-contour wiggle. Falls back to a channel-rack list when a
-project has no pattern data. (pyflp 2.2.1 crashes on Python >= 3.11, hence
-hand-rolled.)
+project has no pattern data.
+
+Why not pyflp: 2.2.1 (the last release, Jun 2023) raises TypeError on the
+first event under Python >= 3.11 - an empty-Enum call now raises before
+`_missing_` is tried - so it parses nothing. leonmendum/PyFLP_FORK fixes
+that, but iterating channels then dies in channel.py on an unconditional
+ChannelID.GroupNum lookup, which FL 1.x-3.x projects never write: 0 of 156
+1999-2002 projects usable. This parser reads all of them, needs no
+dependencies, and agreed with pyflp on version and tempo for every file
+where pyflp worked at all.
 """
 import struct
 from xml.sax.saxutils import escape
