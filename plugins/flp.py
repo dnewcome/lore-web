@@ -31,10 +31,14 @@ EV_CHAN_NAME = 192
 EV_TITLE = 194
 EV_SAMPLE_PATH = 196
 EV_VERSION = 199
+EV_PLUG_DEF = 201       # plugin default name ("Fruity delay", "TS404", ...)
+EV_PLUG_NAME = 203      # user-visible plugin name
+EV_TS404 = 210          # TS404 parameter blob -> the TS404 generator is used
 EV_PAT_NOTES = 224      # packed note structs (FL 3.5+)
 
 SAMPLER = "#5cb85c"
 GENERATOR = "#4a9eda"
+MISSING = "#c9556f"     # channel references a sample absent from the repo
 COLORS = ["#4a9eda", "#e0823d", "#5cb85c", "#c9556f", "#9067c6",
           "#b8a637", "#50b8b0", "#8a8a8a"]
 
@@ -58,7 +62,8 @@ def parse_flp(data):
         raise ValueError("no FLdt chunk")
     end = i + 8 + struct.unpack("<I", data[i + 4:i + 8])[0]
     i += 8
-    out = {"version": None, "tempo": None, "title": None, "ppq": ppq}
+    out = {"version": None, "tempo": None, "title": None, "ppq": ppq,
+           "plugins": set()}
     channels = []           # {"name", "sample"}
     steps = {}              # (chan_idx, pat) -> set of lit step positions
     notes = []              # (pat, rack, pos, dur, key)
@@ -113,6 +118,12 @@ def parse_flp(data):
                 chan("name")["name"] = _text(payload)
             elif ev == EV_SAMPLE_PATH:
                 chan("sample")["sample"] = _text(payload)
+            elif ev in (EV_PLUG_DEF, EV_PLUG_NAME):
+                name = _text(payload).strip()
+                if 1 < len(name) <= 40 and name.isprintable():
+                    out["plugins"].add(name)
+            elif ev == EV_TS404:
+                out["plugins"].add("TS404")
             elif ev == EV_PAT_NOTES and payload and cur_pat is not None:
                 try:
                     major = int((out["version"] or "0").split(".")[0])
@@ -154,7 +165,8 @@ def _pattern_svg(info, rows):
          f'font-size="9">']
     for r, (orig, c) in enumerate(rows):
         y = r * rh
-        tint = SAMPLER if c["sample"] else GENERATOR
+        tint = MISSING if c.get("missing") else \
+            SAMPLER if c["sample"] else GENERATOR
         name = c["name"] or (c["sample"] or "?").replace("\\", "/") \
             .rsplit("/", 1)[-1]
         s.append(f'<rect x="0" y="{y + 2}" width="{name_w}" '
@@ -218,7 +230,8 @@ def _rack_svg(rows):
              f'height="{h}" viewBox="0 0 {w} {h}" '
              f'font-family="system-ui,sans-serif" font-size="11">')
     for i, (_orig, c) in enumerate(shown):
-        color = SAMPLER if c["sample"] else GENERATOR
+        color = MISSING if c.get("missing") else \
+            SAMPLER if c["sample"] else GENERATOR
         name = c["name"] or (c["sample"] or "?").replace("\\", "/") \
             .rsplit("/", 1)[-1]
         y = i * rh
@@ -238,10 +251,35 @@ def inspect(path, ctx):
     rows = [(i, c) for i, c in enumerate(info["channels"])
             if c["name"] or c["sample"]]
     n_samples = sum(1 for _, c in rows if c["sample"])
+
+    # a referenced sample is "missing" when no file in the repo has its
+    # basename (the viewer passes the repo's full file list in ctx)
+    present = {p.replace("\\", "/").rsplit("/", 1)[-1].lower()
+               for p in ctx.get("repo_files") or ()}
+    missing = set()
+    if present:
+        for _, c in rows:
+            if c["sample"]:
+                base = c["sample"].replace("\\", "/").rsplit("/", 1)[-1] \
+                    .lower()
+                if base not in present:
+                    c["missing"] = True
+                    missing.add(base)
     n_steps = sum(len(s) for s in info["steps"].values())
     pats = {p for _, p in info["steps"]} | {n[0] for n in info["notes"]}
 
+    plugins = set(info["plugins"])
+    exts = {(c["sample"] or "").rsplit(".", 1)[-1].lower() for _, c in rows}
+    if "syn" in exts:
+        plugins.add("SimSynth")
+    if "ds" in exts:
+        plugins.add("DrumSynth")
+
     meta = {"channels": len(rows), "samples": n_samples}
+    if plugins:
+        meta["plugins"] = sorted(plugins)[:12]
+    if missing:
+        meta["missing"] = len(missing)
     if pats:
         meta["patterns"] = len(pats)
     if info["notes"] or n_steps:
