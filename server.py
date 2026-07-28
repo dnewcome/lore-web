@@ -362,7 +362,8 @@ def refresh(name, force=False):
     with _lock:
         fresh_clone = not os.path.isdir(os.path.join(path, ".lore"))
         if fresh_clone:
-            os.makedirs(CLONES, exist_ok=True)
+            # namespaced names ("bl1t/drums") nest a level under CLONES
+            os.makedirs(os.path.dirname(path) or CLONES, exist_ok=True)
             run_lore(["clone", f"{REMOTE}/{name}", path])
         elif force or time.time() - _last_sync.get(name, 0) > SYNC_TTL:
             run_lore(["sync"], cwd=path)
@@ -478,6 +479,8 @@ nav{border-right:1px solid #8884;padding:1rem}
 nav h1{font-size:1rem;margin:0 0 .75rem}
 nav a{display:block;padding:.35rem .5rem;border-radius:6px;text-decoration:none;color:inherit}
 nav a.sel,nav a:hover{background:#8882}
+details.ns>summary{cursor:pointer;padding:.35rem .5rem;border-radius:6px;opacity:.7;font-size:.85rem;user-select:none}
+details.ns>a{padding-left:1.1rem}
 main{padding:1rem 1.5rem;max-width:64rem}
 table{border-collapse:collapse;width:100%;font-size:.9rem}
 td,th{text-align:left;padding:.35rem .6rem;border-bottom:1px solid #8883;vertical-align:middle}
@@ -508,7 +511,22 @@ function cloneCmd(name){return `lore clone ${info.public_remote||''}/${name} ${n
 function copyClone(name,btn){navigator.clipboard.writeText(cloneCmd(name)).then(()=>{btn.textContent='copied';setTimeout(()=>btn.textContent='copy',1200)})}
 async function loadRepos(){
   const repos=await j('/api/repos');
-  $('#repos').innerHTML=repos.map(r=>`<a href="#" data-n="${esc(r.name)}">${esc(r.name)}</a>`).join('');
+  // group by namespace: a repo named "bl1t/drums" sits under a "bl1t" heading
+  const groups={};
+  repos.sort((a,b)=>a.name.localeCompare(b.name)).forEach(r=>{
+    const i=r.name.indexOf('/');
+    const ns=i<0?'':r.name.slice(0,i);
+    (groups[ns]??=[]).push(r);
+  });
+  const link=r=>{
+    const i=r.name.indexOf('/');
+    const label=i<0?r.name:r.name.slice(i+1);
+    return `<a href="#" data-n="${esc(r.name)}">${esc(label)}</a>`;
+  };
+  $('#repos').innerHTML=Object.keys(groups).sort().map(ns=>
+    ns===''?groups[ns].map(link).join('')
+      :`<details class="ns" open><summary>${esc(ns)}</summary>${groups[ns].map(link).join('')}</details>`
+  ).join('');
   document.querySelectorAll('#repos a').forEach(a=>a.onclick=e=>{e.preventDefault();show(a.dataset.n)});
 }
 async function show(name,refresh){
@@ -670,8 +688,10 @@ class Handler(BaseHTTPRequestHandler):
                 ctype = "image/svg+xml" if m.group(1) == "svg" else "image/png"
                 with open(full, "rb") as f:
                     self._bytes(f.read(), ctype)
-            elif len(parts) == 4 and parts[:2] == ["api", "repo"]:
-                name, action = parts[2], parts[3]
+            elif len(parts) >= 4 and parts[:2] == ["api", "repo"]:
+                # repo names may contain slashes (namespaces: "bl1t/drums"),
+                # so the name is everything between /api/repo/ and the action
+                name, action = "/".join(parts[2:-1]), parts[-1]
                 if action == "history":
                     if force:
                         refresh(name, force=True)
