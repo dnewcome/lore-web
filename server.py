@@ -200,24 +200,105 @@ def render_preview(src, kind, digest, duration=None):
 
 
 def lore_file_hash(path, rel):
-    out = run_lore(["file", "info", rel], cwd=path, timeout=60)
-    m = re.search(r"^Hash:\s*([0-9a-f]+)", out, re.M)
-    status = re.search(r"^Status:\s*(\S+)", out, re.M)
-    size = re.search(r"^Size:\s*(\d+)", out, re.M)
-    return (m.group(1) if m else None,
-            status.group(1) if status else "-",
-            int(size.group(1)) if size else 0)
+    return lore_file_info(path, [rel]).get(rel, (None, "Gone", 0))
 
 
-def absorb_file(path, rel, manifest):
+def lore_file_info(path, rels, chunk=400):
+    """{rel: (hash, status, size)} for many paths in one CLI call each 400.
+
+    `lore file info` takes any number of paths; one process per file is
+    the difference between a second and a minute on a large repo.
+    """
+    out = {}
+    for i in range(0, len(rels), chunk):
+        batch = rels[i:i + chunk]
+        try:
+            text = run_lore(["file", "info", *batch], cwd=path,
+                            timeout=300)
+        except RuntimeError:
+            # one bad path fails the whole batch: fall back to singles
+            for rel in batch:
+                try:
+                    text = run_lore(["file", "info", rel], cwd=path,
+                                    timeout=60)
+                except RuntimeError:
+                    out[rel] = (None, "Gone", 0)
+                    continue
+                out.update(_parse_file_info(text))
+            continue
+        out.update(_parse_file_info(text))
+    for rel in rels:
+        out.setdefault(rel, (None, "Gone", 0))
+    return out
+
+
+def _parse_file_info(text):
+    """Parse one or more `Path:/Hash:/Status:/Size:` records."""
+    out, cur = {}, None
+    for line in text.splitlines():
+        m = re.match(r"^(Path|Hash|Status|Size):\s*(.*)$", line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if key == "Path":
+            cur = os.path.normpath(val)
+            out[cur] = (None, "-", 0)
+        elif cur is not None:
+            h, st, sz = out[cur]
+            if key == "Hash":
+                out[cur] = (val, st, sz)
+            elif key == "Status":
+                out[cur] = (h, val, sz)
+            elif key == "Size" and val.isdigit():
+                out[cur] = (h, st, int(val))
+    return out
+
+
+CACHED_KEYS = ("kind", "duration", "meta", "preview", "pv_by")
+
+
+def cache_path(digest, pv_by):
+    return os.path.join(PREVIEWS, f"{digest}.{pv_by}.json")
+
+
+def cache_get(digest, pv_by):
+    """Previously computed preview/metadata for this exact content, or None.
+
+    Keyed by content hash *and* the handler that produced it, so identical
+    files anywhere (same repo, other repos) are inspected once, and a new
+    plugin version still invalidates.
+    """
+    try:
+        with open(cache_path(digest, pv_by)) as f:
+            hit = json.load(f)
+    except (OSError, ValueError):
+        return None
+    pv = hit.get("preview")
+    if pv and not os.path.isfile(os.path.join(PREVIEWS, pv)):
+        return None                     # cache entry outlived its artifact
+    return hit
+
+
+def cache_put(digest, entry):
+    payload = {k: entry[k] for k in CACHED_KEYS if k in entry}
+    tmp = cache_path(digest, entry.get("pv_by", "builtin")) + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, cache_path(digest, entry.get("pv_by", "builtin")))
+    except OSError:
+        pass
+
+
+def absorb_file(path, rel, manifest, known=()):
     """File is present on disk: hash it, preview it, purge it, record it."""
     full = os.path.join(path, rel)
     digest = sha256_file(full)
     kind = file_kind(rel)
     plugin = plugin_for(rel)
+    handler = plugin._name if plugin else "builtin"
     entry = manifest.get(rel, {})
-    if entry.get("sha256") != digest or \
-            entry.get("pv_by") != (plugin._name if plugin else "builtin"):
+    if entry.get("sha256") != digest or entry.get("pv_by") != handler:
         entry = {
             "sha256": digest,
             "size": os.path.getsize(full),
@@ -225,12 +306,21 @@ def absorb_file(path, rel, manifest):
             "mtime": int(os.path.getmtime(full)),
             "pv_by": "builtin",
         }
+        hit = cache_get(digest, handler)
+        if hit is not None:
+            entry.update(hit)
+            entry["lore_hash"] = lore_file_hash(path, rel)[0]
+            manifest[rel] = entry
+            if PREVIEW_ONLY:
+                os.unlink(full)
+            return
         if kind in ("audio", "video"):
             entry["duration"] = probe_duration(full)
         if plugin:
             try:
                 res = plugin.inspect(full, {"run": run, "ffmpeg": FFMPEG,
-                                            "ffprobe": FFPROBE}) or {}
+                                            "ffprobe": FFPROBE,
+                                            "repo_files": known}) or {}
                 if res.get("meta"):
                     entry["meta"] = res["meta"]
                 if res.get("kind"):
@@ -248,6 +338,7 @@ def absorb_file(path, rel, manifest):
         if "preview" not in entry and \
                 render_preview(full, kind, digest, entry.get("duration")):
             entry["preview"] = f"{digest}.png"
+        cache_put(digest, entry)
         lore_hash, _, _ = lore_file_hash(path, rel)
         entry["lore_hash"] = lore_hash
     manifest[rel] = entry
@@ -281,15 +372,14 @@ def refresh(name, force=False):
 
         manifest = load_manifest(path)
         # absorb everything sync/clone hydrated
-        for rel in list(scan_disk_files(path)):
-            absorb_file(path, rel, manifest)
+        disk = list(scan_disk_files(path))
+        known = set(manifest) | set(disk)
+        for rel in disk:
+            absorb_file(path, rel, manifest, known)
         # reconcile tracked-but-purged files against repo metadata
+        info = lore_file_info(path, list(manifest))
         for rel in list(manifest):
-            lore_hash, status, size = (None, "-", 0)
-            try:
-                lore_hash, status, size = lore_file_hash(path, rel)
-            except RuntimeError:
-                status = "Gone"
+            lore_hash, status, size = info.get(rel, (None, "Gone", 0))
             plugin = plugin_for(rel)
             needs_replay = plugin and \
                 manifest[rel].get("pv_by") != plugin._name
@@ -297,11 +387,19 @@ def refresh(name, force=False):
                 del manifest[rel]
             elif manifest[rel].get("lore_hash") not in (None, lore_hash) \
                     or needs_replay:
-                # changed remotely, or a new plugin wants a look:
-                # re-hydrate + re-absorb just this file
+                # a new plugin wants a look at content we've already seen
+                # somewhere: take it from cache, no download needed
+                handler = plugin._name if plugin else "builtin"
+                hit = manifest[rel].get("sha256") and \
+                    manifest[rel].get("lore_hash") == lore_hash and \
+                    cache_get(manifest[rel]["sha256"], handler)
+                if hit:
+                    manifest[rel].update(hit)
+                    continue
+                # changed remotely, or uncached: re-hydrate + re-absorb
                 run_lore(["reset", rel], cwd=path)
                 if os.path.exists(os.path.join(path, rel)):
-                    absorb_file(path, rel, manifest)
+                    absorb_file(path, rel, manifest, known)
         save_manifest(path, manifest)
     return path
 
