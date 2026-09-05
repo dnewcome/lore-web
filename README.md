@@ -53,6 +53,9 @@ LORE_REMOTE=lore://your-server:41337 python3 server.py
 | `PREVIEWS_DIR` | sibling `lore-web-previews` | preview cache (PNG/SVG) |
 | `PLUGINS_DIR` | `./plugins` | preview plugin directory |
 | `LORE_BIN`, `FFMPEG`, `FFPROBE` | | tool path overrides |
+| `PD_MAX_WIDTH` | `1200` | cap on rendered Pd patch width; `0` disables |
+| `PD_WIDTH` | *(unset)* | exact Pd patch render width, overriding the cap |
+| `PD_SCALE` | *(unset)* | multiply a Pd patch's natural size |
 
 ## Preview plugins
 
@@ -81,7 +84,8 @@ Ships with five, all pure stdlib apart from the ffmpeg the server already uses:
   channel rack, tempo, plugins, and missing-sample detection
 - **`pd.py`** — Pure Data patches; draws the patch itself as SVG (boxes, cords,
   GUI objects, array traces) without Pd or a display, and reports which object
-  classes are not vanilla, so you can see what a patch needs before opening it
+  classes are not vanilla, so you can see what a patch needs before opening it.
+  Render size is configurable (see below)
 - **`tif.py`** — TIFF/BigTIFF; thumbnail plus compression, bit depth, DPI,
   authoring tool and capture date. Works around several shapes ffmpeg decodes
   to a silent black frame (JPEG-in-TIFF, CMYK) or rejects outright (BigTIFF),
@@ -89,6 +93,33 @@ Ships with five, all pure stdlib apart from the ffmpeg the server already uses:
 
 Each is also runnable as a CLI — `python3 plugins/flp.py --help`,
 `python3 plugins/tif.py --help` — for inspecting files outside the viewer.
+
+A plugin whose output depends on configuration should expose a `CACHE_SALT`
+string that changes with it. Preview art is cached by content hash and
+handler name, so without one the viewer would keep serving art rendered
+under the old settings. An empty salt leaves the cache key untouched.
+
+### Rendering Pd patches at any size
+
+Patch drawings are vector, so size is purely the width and height the SVG
+declares — the viewBox and every coordinate stay in Pd's own pixel units,
+and the picture is identical at every resolution.
+
+```sh
+# a 4x SVG, and a 4000px-wide PNG
+python3 plugins/pd.py patch.pd --svg out/ --scale 4
+python3 plugins/pd.py *.pd    --png out/ --width 4000
+```
+
+`--width` sets the output width exactly, `--scale` multiplies the patch's
+natural size, and with neither the output is capped at `--max-width`
+(default 1200, `0` disables). `--png` needs an SVG rasterizer —
+`rsvg-convert`, `inkscape` or ImageMagick's `convert`, whichever is found
+first, or name one with `--renderer`.
+
+The same knobs configure the viewer through `PD_WIDTH`, `PD_SCALE` and
+`PD_MAX_WIDTH`; setting any of them changes the plugin's cache salt, so
+previews are re-rendered rather than served stale from the cache.
 
 ## Tests
 
@@ -107,6 +138,9 @@ thumbnail appeared" passes while the thumbnail is wrong.
 
 Needs ImageMagick and ffmpeg on PATH; those tests skip themselves if either
 is missing. Fixtures are generated into `tests/fixtures/` and not checked in.
+
+`tests/test_server.py` covers the plugin dispatch and cache-key logic with
+no Lore remote needed.
 
 The Pd plugin (`tests/test_pd.py`) has no external renderer to check against,
 so it asserts on what came out of the file and where the drawing puts it —

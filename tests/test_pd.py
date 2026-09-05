@@ -235,5 +235,115 @@ class DrawTest(unittest.TestCase):
         ET.fromstring(svg)      # raises if malformed
 
 
+class ResolutionTest(unittest.TestCase):
+    """Output size is configurable; the drawing itself must not change."""
+
+    BODY = "#X obj 10 10 osc~ 440;\n#X obj 10 60 dac~;\n#X connect 0 0 1 0;\n"
+
+    def draw(self, **kw):
+        return pd._draw(pd.parse(patch(self.BODY)), **kw)
+
+    def dims(self, svg):
+        m = re.search(r'width="(\d+)" height="(\d+)"', svg)
+        return int(m.group(1)), int(m.group(2))
+
+    def viewbox(self, svg):
+        return re.search(r'viewBox="([^"]+)"', svg).group(1)
+
+    def test_scale_precedence(self):
+        """width beats scale beats cap."""
+        self.assertEqual(pd._scale_for(100, width=400, scale=9, cap=50), 4)
+        self.assertEqual(pd._scale_for(100, scale=3, cap=50), 3)
+        self.assertEqual(pd._scale_for(100, cap=50), 0.5)
+
+    def test_cap_only_shrinks(self):
+        """A patch smaller than the cap keeps its natural size."""
+        self.assertEqual(pd._scale_for(100, cap=1200), 1.0)
+
+    def test_cap_of_zero_disables_it(self):
+        self.assertEqual(pd._scale_for(9000, cap=0), 1.0)
+
+    def test_scale_changes_pixels_but_not_the_drawing(self):
+        """Resolution is the width/height attributes and nothing else.
+
+        If a coordinate moved with the scale factor, high-resolution renders
+        would not be the same picture -- so the viewBox and every path must
+        come out byte-identical.
+        """
+        base = self.draw()
+        for factor in (2, 4, 10):
+            with self.subTest(scale=factor):
+                big = self.draw(scale=factor)
+                w0, h0 = self.dims(base)
+                w1, h1 = self.dims(big)
+                self.assertEqual((w1, h1), (w0 * factor, h0 * factor))
+                self.assertEqual(self.viewbox(big), self.viewbox(base))
+                self.assertEqual(re.findall(r'<path d="[^"]+"', big),
+                                 re.findall(r'<path d="[^"]+"', base))
+
+    def test_explicit_width_is_exact(self):
+        self.assertEqual(self.dims(self.draw(width=3000))[0], 3000)
+
+    def test_aspect_ratio_is_preserved(self):
+        w0, h0 = self.dims(self.draw())
+        w1, h1 = self.dims(self.draw(width=2000))
+        self.assertAlmostEqual(w1 / h1, w0 / h0, places=1)
+
+    def test_env_configures_the_plugin_and_moves_the_cache_salt(self):
+        """Config must invalidate cached previews, or the viewer serves
+        art drawn at the old size for ever."""
+        for env, expect_salt in ((None, False), ({"PD_SCALE": "3"}, True),
+                                 ({"PD_WIDTH": "2400"}, True),
+                                 ({"PD_MAX_WIDTH": "400"}, True)):
+            with self.subTest(env=env):
+                mod = reload_pd(env or {})
+                self.assertEqual(bool(mod.CACHE_SALT), expect_salt)
+        self.assertEqual(reload_pd({}).CACHE_SALT, "",
+                         "defaults must keep existing caches valid")
+
+    def test_env_scale_reaches_the_rendered_svg(self):
+        plain = reload_pd({})
+        scaled = reload_pd({"PD_SCALE": "3"})
+        with tempfile.NamedTemporaryFile("w", suffix=".pd",
+                                         delete=False) as f:
+            f.write(patch(self.BODY))
+        try:
+            a = self.dims(plain.inspect(f.name, {})["preview"][0].decode())
+            b = self.dims(scaled.inspect(f.name, {})["preview"][0].decode())
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(b, (a[0] * 3, a[1] * 3))
+
+    def test_rasterize_reports_a_missing_renderer_clearly(self):
+        import shutil as _shutil
+        original = _shutil.which
+        pd.shutil.which = lambda _tool: None
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                pd.rasterize("<svg/>", "/tmp/never-written.png")
+            self.assertIn("rasterizer", str(caught.exception))
+        finally:
+            pd.shutil.which = original
+        self.assertFalse(os.path.exists("/tmp/never-written.png"))
+
+
+def reload_pd(env):
+    """Import the plugin afresh under the given environment."""
+    keys = ("PD_MAX_WIDTH", "PD_WIDTH", "PD_SCALE")
+    saved = {k: os.environ.get(k) for k in keys}
+    for k in keys:
+        os.environ.pop(k, None)
+    os.environ.update({k: str(v) for k, v in env.items()})
+    try:
+        mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(mod)
+        return mod
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -81,6 +81,20 @@ def load_plugins():
 PLUGINS = load_plugins()
 
 
+def plugin_handler(plugin):
+    """Cache identity for a plugin: its name, plus any config it declares.
+
+    Preview art is cached by content hash and handler, so a plugin whose
+    output depends on configuration must fold that configuration in --
+    otherwise changing a setting leaves the viewer serving art rendered
+    under the old one.  Plugins opt in by exposing CACHE_SALT.
+    """
+    if plugin is None:
+        return "builtin"
+    salt = getattr(plugin, "CACHE_SALT", "")
+    return f"{plugin._name}@{salt}" if salt else plugin._name
+
+
 def plugin_for(relpath):
     ext = os.path.splitext(relpath)[1].lower()
     for p in PLUGINS:
@@ -296,7 +310,7 @@ def absorb_file(path, rel, manifest, known=()):
     digest = sha256_file(full)
     kind = file_kind(rel)
     plugin = plugin_for(rel)
-    handler = plugin._name if plugin else "builtin"
+    handler = plugin_handler(plugin)
     entry = manifest.get(rel, {})
     if entry.get("sha256") != digest or entry.get("pv_by") != handler:
         entry = {
@@ -332,7 +346,7 @@ def absorb_file(path, rel, manifest, known=()):
                     with open(os.path.join(PREVIEWS, pv), "wb") as f:
                         f.write(data)
                     entry["preview"] = pv
-                entry["pv_by"] = plugin._name
+                entry["pv_by"] = handler
             except Exception as e:  # noqa: BLE001 - plugin failure falls back to builtin
                 print(f"plugin {plugin._name} failed on {rel}: {e}")
         if "preview" not in entry and \
@@ -383,14 +397,14 @@ def refresh(name, force=False):
             lore_hash, status, size = info.get(rel, (None, "Gone", 0))
             plugin = plugin_for(rel)
             needs_replay = plugin and \
-                manifest[rel].get("pv_by") != plugin._name
+                manifest[rel].get("pv_by") != plugin_handler(plugin)
             if status == "Gone" or lore_hash is None:
                 del manifest[rel]
             elif manifest[rel].get("lore_hash") not in (None, lore_hash) \
                     or needs_replay:
                 # a new plugin wants a look at content we've already seen
                 # somewhere: take it from cache, no download needed
-                handler = plugin._name if plugin else "builtin"
+                handler = plugin_handler(plugin)
                 hit = manifest[rel].get("sha256") and \
                     manifest[rel].get("lore_hash") == lore_hash and \
                     cache_get(manifest[rel]["sha256"], handler)

@@ -26,6 +26,8 @@ a patch needs GEM or zexy before trying to open it.
 """
 import os
 import re
+import shutil
+import subprocess
 
 MATCH = [".pd"]
 
@@ -41,7 +43,25 @@ BOX_PAD_X = 5           # Pd's LMARGIN + RMARGIN
 FLAG_W = {"msg": 6, "floatatom": 5, "symbolatom": 5, "listbox": 5}
 BOX_PAD_Y = 4           # TMARGIN + BMARGIN
 IO_W, IO_H = 7, 2       # inlet/outlet nub
-MAX_W = 1200            # cap on emitted SVG width
+# Output size is configurable, since the same drawing serves a 460px
+# thumbnail in the viewer and a wall-sized render of a patch.  SVG is
+# vector, so "resolution" is purely the width/height the file declares --
+# the viewBox and every coordinate stay in Pd's own pixel units.
+#   PD_MAX_WIDTH  cap on the emitted width (default 1200; 0 disables)
+#   PD_WIDTH      exact output width, overriding the cap
+#   PD_SCALE      multiplier on the patch's natural size
+MAX_W = int(os.environ.get("PD_MAX_WIDTH", 1200))
+OUT_W = int(os.environ.get("PD_WIDTH", 0)) or None
+OUT_SCALE = float(os.environ.get("PD_SCALE", 0)) or None
+
+# Preview art is cached by content hash and handler name, so a handler
+# whose output depends on configuration has to say when that configuration
+# changed -- otherwise the viewer keeps serving art drawn at the old size.
+# Empty while the defaults are in force, which keeps existing caches valid.
+CACHE_SALT = "" if (MAX_W, OUT_W, OUT_SCALE) == (1200, None, None) else \
+    f"w{MAX_W}-{OUT_W or 0}-{OUT_SCALE or 0:g}"
+
+RASTERIZERS = ("rsvg-convert", "inkscape", "convert")
 COMMENT_WRAP = 60       # chars before a comment wraps, when not set explicitly
 
 # GUI classes and where their pixel size lives in the argument list.
@@ -394,8 +414,26 @@ def _shape(node):
     return f"M{x} {y}H{x + w}V{y + h}H{x}Z"
 
 
-def _draw(canvas, width_cap=MAX_W):
-    """Render the top canvas as an SVG string."""
+def _scale_for(vw, width=None, scale=None, cap=None):
+    """Multiplier taking a patch vw pixels wide to the requested output.
+
+    An explicit width wins, then an explicit scale, then the cap -- which
+    only ever shrinks, so small patches keep their natural size.
+    """
+    if width:
+        return width / vw
+    if scale:
+        return scale
+    cap = MAX_W if cap is None else cap
+    return min(1.0, cap / vw) if cap else 1.0
+
+
+def _draw(canvas, width=None, scale=None, cap=None):
+    """Render the top canvas as an SVG string.
+
+    width/scale/cap set the emitted pixel size only; coordinates stay in
+    Pd's units so the drawing is identical at every resolution.
+    """
     font = canvas.font if canvas.font in FONTS else 10
     fw, fh = FONTS[font]
     for node in canvas.objects:
@@ -409,9 +447,9 @@ def _draw(canvas, width_cap=MAX_W):
     x1 = max(n["x"] + n["w"] for n in canvas.objects) + pad
     y1 = max(n["y"] + n["h"] for n in canvas.objects) + pad
     vw, vh = max(x1 - x0, 1), max(y1 - y0, 1)
-    scale = min(1.0, width_cap / vw)
+    factor = _scale_for(vw, width, scale, cap)
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" '
-           f'width="{vw * scale:.0f}" height="{vh * scale:.0f}" '
+           f'width="{vw * factor:.0f}" height="{vh * factor:.0f}" '
            f'viewBox="{x0} {y0} {vw} {vh}">',
            f'<rect x="{x0}" y="{y0}" width="{vw}" height="{vh}" '
            f'fill="{C_CANVAS}"/>']
@@ -498,6 +536,36 @@ def _trace(node):
             f'stroke="{C_LINE}" stroke-width="1"/>')
 
 
+def rasterize(svg, dest, tool=None):
+    """Write PNG bytes for an SVG string to dest, via whatever is installed.
+
+    The SVG already declares the output size, so the rasterizer only has to
+    honour it; every one of these does.
+    """
+    tool = tool or next((t for t in RASTERIZERS if shutil.which(t)), None)
+    if tool is None:
+        raise RuntimeError("no SVG rasterizer found; install one of: "
+                           + ", ".join(RASTERIZERS))
+    if not shutil.which(tool):
+        raise RuntimeError(f"rasterizer {tool!r} not found")
+    tmp = dest + ".svg"
+    with open(tmp, "wb") as f:
+        f.write(svg if isinstance(svg, bytes) else svg.encode())
+    try:
+        if tool == "rsvg-convert":
+            cmd = [tool, tmp, "-o", dest]
+        elif tool == "inkscape":
+            cmd = [tool, "--export-type=png",
+                   f"--export-filename={dest}", tmp]
+        else:                                   # ImageMagick
+            cmd = [tool, "-background", "none", tmp, dest]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return dest
+
+
 # --- census ------------------------------------------------------------
 def _walk(canvas):
     yield canvas
@@ -551,38 +619,70 @@ def inspect(path, ctx):
     if root is None:
         raise ValueError("no canvas record: not a Pd patch")
     out = {"meta": _meta(root), "kind": "puredata"}
-    svg = _draw(root)
+    svg = _draw(root, width=OUT_W, scale=OUT_SCALE, cap=MAX_W)
     if svg:
         out["preview"] = (svg.encode(), "svg")
     return out
 
 
 def _cli(argv=None):
-    """Standalone: dump the census, or write patch SVGs to a directory."""
+    """Standalone: census, or render patches at any size."""
     import argparse
     import json
 
-    ap = argparse.ArgumentParser(description="inspect/draw Pd patches")
+    ap = argparse.ArgumentParser(
+        description="inspect and draw Pure Data patches",
+        epilog="Size: --width sets the output width exactly, --scale "
+               "multiplies the patch's natural size, and without either the "
+               "output is capped at --max-width. The drawing is vector, so "
+               "these change resolution only, never layout.")
     ap.add_argument("files", nargs="+")
     ap.add_argument("--json", action="store_true", help="census as JSON")
     ap.add_argument("--svg", metavar="DIR", help="write <name>.svg here")
+    ap.add_argument("--png", metavar="DIR",
+                    help="write <name>.png here (needs an SVG rasterizer)")
+    ap.add_argument("--width", type=int, metavar="PX",
+                    help="exact output width in pixels")
+    ap.add_argument("--scale", type=float, metavar="N",
+                    help="multiply the patch's natural size (2 = double)")
+    ap.add_argument("--max-width", type=int, default=MAX_W, metavar="PX",
+                    help=f"cap when neither --width nor --scale is given "
+                         f"(default {MAX_W}; 0 disables)")
+    ap.add_argument("--renderer", choices=RASTERIZERS,
+                    help="force a rasterizer for --png (default: first found)")
     args = ap.parse_args(argv)
 
     report, rc = {}, 0
     for path in args.files:
         try:
-            res = inspect(path, {})
-            meta = dict(res["meta"])
-            if args.svg:
-                os.makedirs(args.svg, exist_ok=True)
-                name = os.path.splitext(os.path.basename(path))[0] + ".svg"
-                dest = os.path.join(args.svg, name)
-                if res.get("preview"):
-                    with open(dest, "wb") as w:
-                        w.write(res["preview"][0])
+            with open(path, "rb") as f:
+                raw = f.read()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1")
+            root = parse(text.replace("\r\n", "\n"))
+            if root is None:
+                raise ValueError("no canvas record: not a Pd patch")
+            meta = _meta(root)
+            svg = _draw(root, width=args.width, scale=args.scale,
+                        cap=args.max_width)
+            if svg is None and (args.svg or args.png):
+                meta["render"] = "empty patch"
+            elif svg is not None:
+                stem = os.path.splitext(os.path.basename(path))[0]
+                size = re.search(r'width="(\d+)" height="(\d+)"', svg)
+                meta["render"] = f"{size.group(1)}x{size.group(2)}"
+                if args.svg:
+                    os.makedirs(args.svg, exist_ok=True)
+                    dest = os.path.join(args.svg, stem + ".svg")
+                    with open(dest, "w") as w:
+                        w.write(svg)
                     meta["svg"] = dest
-                else:
-                    meta["svg"] = "empty patch"
+                if args.png:
+                    os.makedirs(args.png, exist_ok=True)
+                    dest = os.path.join(args.png, stem + ".png")
+                    meta["png"] = rasterize(svg, dest, args.renderer)
         except Exception as e:                  # noqa: BLE001
             meta, rc = {"error": f"{type(e).__name__}: {e}"}, 1
         report[path] = meta
