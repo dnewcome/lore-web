@@ -72,13 +72,16 @@ Plugin failures fall back to the built-in preview; results are cached by
 content hash, and when a new plugin appears, already-purged files are
 re-hydrated once and re-inspected automatically.
 
-Ships with four, all pure stdlib apart from the ffmpeg the server already uses:
+Ships with five, all pure stdlib apart from the ffmpeg the server already uses:
 
 - **`midi.py`** — SMF parser; piano-roll SVG, track/note/BPM/length chips
 - **`ableton.py`** — reads `.als` (gzipped XML); track-map SVG, track counts,
   tempo, and the devices/plugins used in the set
 - **`flp.py`** — FL Studio projects back to the 1998 format; pattern-grid SVG,
   channel rack, tempo, plugins, and missing-sample detection
+- **`pd.py`** — Pure Data patches; draws the patch itself as SVG (boxes, cords,
+  GUI objects, array traces) without Pd or a display, and reports which object
+  classes are not vanilla, so you can see what a patch needs before opening it
 - **`tif.py`** — TIFF/BigTIFF; thumbnail plus compression, bit depth, DPI,
   authoring tool and capture date. Works around several shapes ffmpeg decodes
   to a silent black frame (JPEG-in-TIFF, CMYK) or rejects outright (BigTIFF),
@@ -93,7 +96,7 @@ Each is also runnable as a CLI — `python3 plugins/flp.py --help`,
 python3 -m unittest discover -s tests -v
 ```
 
-Currently covers the TIFF plugin: `tests/fixtures_tif.py` generates a corpus
+The TIFF plugin: `tests/fixtures_tif.py` generates a corpus
 spanning every compression, both byte orders, 1/8/16/32-bit and float samples,
 tiled/stripped/multi-page layouts and RGB/gray/inverted/CMYK colour, and
 `tests/test_tif.py` compares every page against an ImageMagick reference.
@@ -102,8 +105,18 @@ Assertions are on pixel values, never exit status — ffmpeg returns 0 on
 several TIFF variants it decodes to black, so a test that only checks "a
 thumbnail appeared" passes while the thumbnail is wrong.
 
-Needs ImageMagick and ffmpeg on PATH; the suite skips itself if either is
-missing. Fixtures are generated into `tests/fixtures/` and not checked in.
+Needs ImageMagick and ffmpeg on PATH; those tests skip themselves if either
+is missing. Fixtures are generated into `tests/fixtures/` and not checked in.
+
+The Pd plugin (`tests/test_pd.py`) has no external renderer to check against,
+so it asserts on what came out of the file and where the drawing puts it —
+box geometry against Pd's own font table, port positions, cord routing, and
+that the emitted SVG is well-formed XML. Pure stdlib, no external tools.
+
+Both suites were mutation-checked: breaking a behaviour on purpose must fail
+a test. Two assertions were rewritten because they did not — one compared the
+code against its own constant, the other could not see a spec violation both
+ffmpeg and ImageMagick tolerate.
 
 ## How it works
 
