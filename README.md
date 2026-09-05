@@ -72,11 +72,38 @@ Plugin failures fall back to the built-in preview; results are cached by
 content hash, and when a new plugin appears, already-purged files are
 re-hydrated once and re-inspected automatically.
 
-Ships with two:
+Ships with four, all pure stdlib apart from the ffmpeg the server already uses:
 
-- **`midi.py`** — pure-stdlib SMF parser; piano-roll SVG, track/note/BPM/length chips
+- **`midi.py`** — SMF parser; piano-roll SVG, track/note/BPM/length chips
 - **`ableton.py`** — reads `.als` (gzipped XML); track-map SVG, track counts,
   tempo, and the devices/plugins used in the set
+- **`flp.py`** — FL Studio projects back to the 1998 format; pattern-grid SVG,
+  channel rack, tempo, plugins, and missing-sample detection
+- **`tif.py`** — TIFF/BigTIFF; thumbnail plus compression, bit depth, DPI,
+  authoring tool and capture date. Works around several shapes ffmpeg decodes
+  to a silent black frame (JPEG-in-TIFF, CMYK) or rejects outright (BigTIFF),
+  and refuses by name the two it cannot fix rather than showing a wrong image
+
+Each is also runnable as a CLI — `python3 plugins/flp.py --help`,
+`python3 plugins/tif.py --help` — for inspecting files outside the viewer.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+Currently covers the TIFF plugin: `tests/fixtures_tif.py` generates a corpus
+spanning every compression, both byte orders, 1/8/16/32-bit and float samples,
+tiled/stripped/multi-page layouts and RGB/gray/inverted/CMYK colour, and
+`tests/test_tif.py` compares every page against an ImageMagick reference.
+
+Assertions are on pixel values, never exit status — ffmpeg returns 0 on
+several TIFF variants it decodes to black, so a test that only checks "a
+thumbnail appeared" passes while the thumbnail is wrong.
+
+Needs ImageMagick and ffmpeg on PATH; the suite skips itself if either is
+missing. Fixtures are generated into `tests/fixtures/` and not checked in.
 
 ## How it works
 
